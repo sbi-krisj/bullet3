@@ -17,6 +17,7 @@ subject to the following restrictions:
 #include "BulletCollision/NarrowPhaseCollision/btPersistentManifold.h"
 #include "BulletCollision/CollisionDispatch/btCollisionObject.h"
 #include "BulletCollision/CollisionDispatch/btCollisionObjectWrapper.h"
+#include "BulletCollision/CollisionShapes/btTriangleShape.h"
 
 ///This is to allow MaterialCombiner/Custom Friction/Restitution values
 ContactAddedCallback gContactAddedCallback = 0;
@@ -185,7 +186,7 @@ void btManifoldResult::addContactPoint(const btVector3& normalOnBInWorld, const 
 	}
 
 	//User can override friction and/or restitution
-	if (gContactAddedCallback &&
+	if ( //gContactAddedCallback &&
 		//and if either of the two bodies requires custom material
 		((m_body0Wrap->getCollisionObject()->getCollisionFlags() & btCollisionObject::CF_CUSTOM_MATERIAL_CALLBACK) ||
 		 (m_body1Wrap->getCollisionObject()->getCollisionFlags() & btCollisionObject::CF_CUSTOM_MATERIAL_CALLBACK)))
@@ -193,7 +194,27 @@ void btManifoldResult::addContactPoint(const btVector3& normalOnBInWorld, const 
 		//experimental feature info, for per-triangle material etc.
 		const btCollisionObjectWrapper* obj0Wrap = isSwapped ? m_body1Wrap : m_body0Wrap;
 		const btCollisionObjectWrapper* obj1Wrap = isSwapped ? m_body0Wrap : m_body1Wrap;
-		(*gContactAddedCallback)(m_manifoldPtr->getContactPoint(insertIndex), obj0Wrap, newPt.m_partId0, newPt.m_index0, obj1Wrap, newPt.m_partId1, newPt.m_index1);
+		btManifoldPoint& cp = m_manifoldPtr->getContactPoint(insertIndex);
+
+		if (obj1Wrap->getCollisionShape()->getShapeType() == TRIANGLE_SHAPE_PROXYTYPE)
+		 {
+				 const btTriangleShape* triShape = static_cast<const btTriangleShape*>( obj1Wrap->getCollisionShape() );
+				 const btVector3* v = triShape->m_vertices1;
+				 btVector3 faceNormalLs = btCross(v[1] - v[0], v[2] - v[0]);
+				 faceNormalLs.normalize();
+				 btVector3 faceNormalWs = obj1Wrap->getWorldTransform().getBasis() * faceNormalLs;
+				 float nDotF = btDot( faceNormalWs, cp.m_normalWorldOnB );
+				 if ( nDotF <= 0.0f )
+				 {
+						 // flip the contact normal to be aligned with the face normal
+						 cp.m_normalWorldOnB += -2.0f * nDotF * faceNormalWs;
+				 }
+		 }
+
+
+	//	(*gContactAddedCallback)(cp,obj0Wrap,newPt.m_partId0,newPt.m_index0,obj1Wrap,newPt.m_partId1,newPt.m_index1);
+
+	//	(*gContactAddedCallback)(m_manifoldPtr->getContactPoint(insertIndex), obj0Wrap, newPt.m_partId0, newPt.m_index0, obj1Wrap, newPt.m_partId1, newPt.m_index1);
 	}
 
 	if (gContactStartedCallback && isNewCollision)

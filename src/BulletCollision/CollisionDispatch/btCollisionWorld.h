@@ -264,6 +264,33 @@ public:
 		}
 	};
 
+	struct	ClosestRayBodyTestResultCallback : public ClosestRayResultCallback
+  {
+    ClosestRayBodyTestResultCallback(const btVector3&	rayFromWorld,const btVector3&	rayToWorld, int bodyId)
+    :ClosestRayResultCallback(rayFromWorld, rayToWorld),
+    m_bodyId(bodyId),
+    m_bodyTest(true)
+    {
+    }
+
+    int m_bodyId;
+    bool m_bodyTest;
+
+    virtual bool needsCollision(btBroadphaseProxy* proxy0) const
+    {
+      bool collides = (proxy0->m_collisionFilterGroup & m_collisionFilterMask) != 0;
+      collides = collides && (m_collisionFilterGroup & proxy0->m_collisionFilterMask);
+      if(collides) {
+        btCollisionObject* colObj0 = (btCollisionObject*)proxy0->m_clientObject;
+        if(m_bodyTest == (colObj0->getUserIndex() == m_bodyId)) {
+          collides = false;
+        }
+      }
+      return collides;
+    }
+
+  };
+
 	struct AllHitsRayResultCallback : public RayResultCallback
 	{
 		AllHitsRayResultCallback(const btVector3& rayFromWorld, const btVector3& rayToWorld)
