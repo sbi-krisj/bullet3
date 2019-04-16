@@ -1613,6 +1613,7 @@ struct PhysicsServerCommandProcessorInternalData
 
 	btScalar m_physicsDeltaTime;
 	btScalar m_numSimulationSubSteps;
+        btScalar m_simulationTimestamp;
 	btAlignedObjectArray<btMultiBodyJointFeedback*> m_multiBodyJointFeedbacks;
 	b3HashMap<btHashPtr, btInverseDynamics::MultiBodyTree*> m_inverseDynamicsBodies;
 	b3HashMap<btHashPtr, IKTrajectoryHelper*> m_inverseKinematicsHelpers;
@@ -1698,6 +1699,7 @@ struct PhysicsServerCommandProcessorInternalData
 		  m_logPlaybackUid(-1),
 		  m_physicsDeltaTime(1. / 240.),
 		  m_numSimulationSubSteps(0),
+                  m_simulationTimestamp(0),
 		  m_userConstraintUIDGenerator(1),
 		  m_broadphaseCollisionFilterCallback(0),
 		  m_pairCache(0),
@@ -2621,7 +2623,7 @@ void PhysicsServerCommandProcessor::createEmptyDynamicsWorld()
 #endif
 
 	//Workaround: in a VR application, where we avoid synchronizing between GFX/Physics threads, we don't want to resize this array, so pre-allocate it
-	m_data->m_dynamicsWorld->getCollisionObjectArray().reserve(32768);
+	m_data->m_dynamicsWorld->getCollisionObjectArray().reserve(128 * 1024);
 
 	m_data->m_remoteDebugDrawer = new SharedMemoryDebugDrawer();
 
@@ -4401,7 +4403,7 @@ bool PhysicsServerCommandProcessor::processCreateCollisionShapeCommand(const str
 								btVector3 v2(vertexUpload[i2*3+0],
 									vertexUpload[i2*3+1],
 									vertexUpload[i2*3+2]);
-								meshInterface->addTriangle(v0, v1, v2);
+								meshInterface->addTriangle(v0*meshScale, v1*meshScale, v2*meshScale);
 							}
 						}
 
@@ -4434,7 +4436,7 @@ bool PhysicsServerCommandProcessor::processCreateCollisionShapeCommand(const str
 							btVector3 pt(vertexUpload[v*3+0],
 								vertexUpload[v*3+1],
 								vertexUpload[v*3+2]);
-							convexHull->addPoint(pt, false);
+							convexHull->addPoint(pt*meshScale, false);
 						}
 
 						convexHull->recalcLocalAabb();
@@ -5403,7 +5405,7 @@ bool PhysicsServerCommandProcessor::processRequestRaycastIntersectionsCommand(co
 			int linkIndex = -1;
 			if (bodyHandle->m_multiBody)
 			{
-				int linkIndex = clientCmd.m_userDebugDrawArgs.m_parentLinkIndex;
+				int linkIndex = clientCmd.m_requestRaycastIntersections.m_parentLinkIndex;
 				if (linkIndex == -1)
 				{
 					tr = bodyHandle->m_multiBody->getBaseWorldTransform();
@@ -5599,22 +5601,23 @@ bool PhysicsServerCommandProcessor::processAddUserDataCommand(const struct Share
 	BT_PROFILE("CMD_ADD_USER_DATA");
 	serverStatusOut.m_type = CMD_ADD_USER_DATA_FAILED;
 
-	if (clientCmd.m_addUserDataRequestArgs.m_bodyUniqueId < 0 || clientCmd.m_addUserDataRequestArgs.m_bodyUniqueId >= m_data->m_bodyHandles.getNumHandles())
+	const AddUserDataRequestArgs &addUserDataArgs = clientCmd.m_addUserDataRequestArgs;
+	if (addUserDataArgs.m_bodyUniqueId < 0 || addUserDataArgs.m_bodyUniqueId >= m_data->m_bodyHandles.getNumHandles())
 	{
 		return hasStatus;
 	}
 
-	InternalBodyData* body = m_data->m_bodyHandles.getHandle(clientCmd.m_addUserDataRequestArgs.m_bodyUniqueId);
+	InternalBodyData* body = m_data->m_bodyHandles.getHandle(addUserDataArgs.m_bodyUniqueId);
 	if (!body)
 	{
 		return hasStatus;
 	}
 
 	SharedMemoryUserDataHashKey userDataIdentifier(
-		clientCmd.m_addUserDataRequestArgs.m_key,
-		clientCmd.m_addUserDataRequestArgs.m_bodyUniqueId,
-		clientCmd.m_addUserDataRequestArgs.m_linkIndex,
-		clientCmd.m_addUserDataRequestArgs.m_visualShapeIndex);
+		addUserDataArgs.m_key,
+		addUserDataArgs.m_bodyUniqueId,
+		addUserDataArgs.m_linkIndex,
+		addUserDataArgs.m_visualShapeIndex);
 
 	int* userDataHandlePtr = m_data->m_userDataHandleLookup.find(userDataIdentifier);
 	int userDataHandle = userDataHandlePtr ? *userDataHandlePtr : m_data->m_userDataHandles.allocHandle();
@@ -5627,29 +5630,33 @@ bool PhysicsServerCommandProcessor::processAddUserDataCommand(const struct Share
 
 	if (!userDataHandlePtr)
 	{
-		userData->m_key = clientCmd.m_addUserDataRequestArgs.m_key;
-		userData->m_bodyUniqueId = clientCmd.m_addUserDataRequestArgs.m_bodyUniqueId;
-		userData->m_linkIndex = clientCmd.m_addUserDataRequestArgs.m_linkIndex;
-		userData->m_visualShapeIndex = clientCmd.m_addUserDataRequestArgs.m_visualShapeIndex;
+		userData->m_key = addUserDataArgs.m_key;
+		userData->m_bodyUniqueId = addUserDataArgs.m_bodyUniqueId;
+		userData->m_linkIndex = addUserDataArgs.m_linkIndex;
+		userData->m_visualShapeIndex = addUserDataArgs.m_visualShapeIndex;
 		m_data->m_userDataHandleLookup.insert(userDataIdentifier, userDataHandle);
 		body->m_userDataHandles.push_back(userDataHandle);
 	}
-	userData->replaceValue(bufferServerToClient,
-						   clientCmd.m_addUserDataRequestArgs.m_valueLength,
-						   clientCmd.m_addUserDataRequestArgs.m_valueType);
+	userData->replaceValue(bufferServerToClient, addUserDataArgs.m_valueLength, addUserDataArgs.m_valueType);
 
 	serverStatusOut.m_type = CMD_ADD_USER_DATA_COMPLETED;
-	serverStatusOut.m_userDataResponseArgs.m_userDataId = userDataHandle;
-	serverStatusOut.m_userDataResponseArgs.m_bodyUniqueId = clientCmd.m_addUserDataRequestArgs.m_bodyUniqueId;
-	serverStatusOut.m_userDataResponseArgs.m_linkIndex = clientCmd.m_addUserDataRequestArgs.m_linkIndex;
-	serverStatusOut.m_userDataResponseArgs.m_visualShapeIndex = clientCmd.m_addUserDataRequestArgs.m_visualShapeIndex;
-	serverStatusOut.m_userDataResponseArgs.m_valueLength = clientCmd.m_addUserDataRequestArgs.m_valueLength;
-	serverStatusOut.m_userDataResponseArgs.m_valueType = clientCmd.m_addUserDataRequestArgs.m_valueType;
-	strcpy(serverStatusOut.m_userDataResponseArgs.m_key, clientCmd.m_addUserDataRequestArgs.m_key);
+	UserDataResponseArgs &userDataResponseArgs = serverStatusOut.m_userDataResponseArgs;
+	userDataResponseArgs.m_userDataId = userDataHandle;
+	userDataResponseArgs.m_bodyUniqueId = addUserDataArgs.m_bodyUniqueId;
+	userDataResponseArgs.m_linkIndex = addUserDataArgs.m_linkIndex;
+	userDataResponseArgs.m_visualShapeIndex = addUserDataArgs.m_visualShapeIndex;
+	userDataResponseArgs.m_valueLength = addUserDataArgs.m_valueLength;
+	userDataResponseArgs.m_valueType = addUserDataArgs.m_valueType;
+	strcpy(userDataResponseArgs.m_key, addUserDataArgs.m_key);
 
 	b3Notification notification;
 	notification.m_notificationType = USER_DATA_ADDED;
-	notification.m_userDataArgs.m_userDataId = userDataHandle;
+	b3UserDataNotificationArgs &userDataArgs = notification.m_userDataArgs;
+	userDataArgs.m_userDataId = userDataHandle;
+	userDataArgs.m_bodyUniqueId =  addUserDataArgs.m_bodyUniqueId;
+	userDataArgs.m_linkIndex =  addUserDataArgs.m_linkIndex;
+	userDataArgs.m_visualShapeIndex =  addUserDataArgs.m_visualShapeIndex;
+	strcpy(userDataArgs.m_key, addUserDataArgs.m_key);
 	m_data->m_pluginManager.addNotification(notification);
 
 	// Keep bufferServerToClient as-is.
@@ -5717,7 +5724,7 @@ bool PhysicsServerCommandProcessor::processCollisionFilterCommand(const struct S
 			btCollisionObject* colObj = 0;
 			if (body->m_multiBody)
 			{
-				if (clientCmd.m_collisionFilterArgs.m_linkIndexA)
+				if (clientCmd.m_collisionFilterArgs.m_linkIndexA==-1)
 				{
 					colObj = body->m_multiBody->getBaseCollider();
 				}
@@ -5766,17 +5773,22 @@ bool PhysicsServerCommandProcessor::processRemoveUserDataCommand(const struct Sh
 	}
 	body->m_userDataHandles.remove(clientCmd.m_removeUserDataRequestArgs.m_userDataId);
 
+	b3Notification notification;
+	notification.m_notificationType = USER_DATA_REMOVED;
+	b3UserDataNotificationArgs &userDataArgs = notification.m_userDataArgs;
+	userDataArgs.m_userDataId = clientCmd.m_removeUserDataRequestArgs.m_userDataId;
+	userDataArgs.m_bodyUniqueId =  userData->m_bodyUniqueId;
+	userDataArgs.m_linkIndex =  userData->m_linkIndex;
+	userDataArgs.m_visualShapeIndex =  userData->m_visualShapeIndex;
+	strcpy(userDataArgs.m_key, userData->m_key.c_str());
+
 	m_data->m_userDataHandleLookup.remove(SharedMemoryUserDataHashKey(userData));
 	m_data->m_userDataHandles.freeHandle(clientCmd.m_removeUserDataRequestArgs.m_userDataId);
 
 	serverStatusOut.m_removeUserDataResponseArgs = clientCmd.m_removeUserDataRequestArgs;
 	serverStatusOut.m_type = CMD_REMOVE_USER_DATA_COMPLETED;
 
-	b3Notification notification;
-	notification.m_notificationType = USER_DATA_REMOVED;
-	notification.m_userDataArgs.m_userDataId = clientCmd.m_removeUserDataRequestArgs.m_userDataId;
 	m_data->m_pluginManager.addNotification(notification);
-
 	return hasStatus;
 }
 
@@ -6316,15 +6328,26 @@ bool PhysicsServerCommandProcessor::processRequestActualStateCommand(const struc
 	int bodyUniqueId = clientCmd.m_requestActualStateInformationCommandArgument.m_bodyUniqueId;
 	InternalBodyData* body = m_data->m_bodyHandles.getHandle(bodyUniqueId);
 
+	//we store the state details in the shared memory block, to reduce status size
+	SendActualStateSharedMemoryStorage* stateDetails = (SendActualStateSharedMemoryStorage*)bufferServerToClient;
+	
+	//make sure the storage fits, otherwise
+	btAssert(sizeof(SendActualStateSharedMemoryStorage) < bufferSizeInBytes);
+	if (sizeof(SendActualStateSharedMemoryStorage) > bufferSizeInBytes)
+	{
+		//this forces an error report
+		body = 0;
+	}
 	if (body && body->m_multiBody)
 	{
 		btMultiBody* mb = body->m_multiBody;
 		SharedMemoryStatus& serverCmd = serverStatusOut;
+		
 		serverStatusOut.m_type = CMD_ACTUAL_STATE_UPDATE_COMPLETED;
 
 		serverCmd.m_sendActualStateArgs.m_bodyUniqueId = bodyUniqueId;
 		serverCmd.m_sendActualStateArgs.m_numLinks = body->m_multiBody->getNumLinks();
-
+		serverCmd.m_sendActualStateArgs.m_stateDetails = 0;
 		int totalDegreeOfFreedomQ = 0;
 		int totalDegreeOfFreedomU = 0;
 
@@ -6360,26 +6383,26 @@ bool PhysicsServerCommandProcessor::processRequestActualStateCommand(const struc
 				body->m_rootLocalInertialFrame.getRotation()[3];
 
 			//base position in world space, carthesian
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[0] = tr.getOrigin()[0];
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[1] = tr.getOrigin()[1];
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[2] = tr.getOrigin()[2];
+			stateDetails->m_actualStateQ[0] = tr.getOrigin()[0];
+			stateDetails->m_actualStateQ[1] = tr.getOrigin()[1];
+			stateDetails->m_actualStateQ[2] = tr.getOrigin()[2];
 
 			//base orientation, quaternion x,y,z,w, in world space, carthesian
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[3] = tr.getRotation()[0];
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[4] = tr.getRotation()[1];
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[5] = tr.getRotation()[2];
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[6] = tr.getRotation()[3];
+			stateDetails->m_actualStateQ[3] = tr.getRotation()[0];
+			stateDetails->m_actualStateQ[4] = tr.getRotation()[1];
+			stateDetails->m_actualStateQ[5] = tr.getRotation()[2];
+			stateDetails->m_actualStateQ[6] = tr.getRotation()[3];
 			totalDegreeOfFreedomQ += 7;  //pos + quaternion
 
 			//base linear velocity (in world space, carthesian)
-			serverCmd.m_sendActualStateArgs.m_actualStateQdot[0] = mb->getBaseVel()[0];
-			serverCmd.m_sendActualStateArgs.m_actualStateQdot[1] = mb->getBaseVel()[1];
-			serverCmd.m_sendActualStateArgs.m_actualStateQdot[2] = mb->getBaseVel()[2];
+			stateDetails->m_actualStateQdot[0] = mb->getBaseVel()[0];
+			stateDetails->m_actualStateQdot[1] = mb->getBaseVel()[1];
+			stateDetails->m_actualStateQdot[2] = mb->getBaseVel()[2];
 
 			//base angular velocity (in world space, carthesian)
-			serverCmd.m_sendActualStateArgs.m_actualStateQdot[3] = mb->getBaseOmega()[0];
-			serverCmd.m_sendActualStateArgs.m_actualStateQdot[4] = mb->getBaseOmega()[1];
-			serverCmd.m_sendActualStateArgs.m_actualStateQdot[5] = mb->getBaseOmega()[2];
+			stateDetails->m_actualStateQdot[3] = mb->getBaseOmega()[0];
+			stateDetails->m_actualStateQdot[4] = mb->getBaseOmega()[1];
+			stateDetails->m_actualStateQdot[5] = mb->getBaseOmega()[2];
 			totalDegreeOfFreedomU += 6;  //3 linear and 3 angular DOF
 		}
 
@@ -6411,18 +6434,44 @@ bool PhysicsServerCommandProcessor::processRequestActualStateCommand(const struc
 		{
 			for (int d = 0; d < mb->getLink(l).m_posVarCount; d++)
 			{
-				serverCmd.m_sendActualStateArgs.m_actualStateQ[totalDegreeOfFreedomQ++] = mb->getJointPosMultiDof(l)[d];
+				stateDetails->m_actualStateQ[totalDegreeOfFreedomQ++] = mb->getJointPosMultiDof(l)[d];
 			}
 			for (int d = 0; d < mb->getLink(l).m_dofCount; d++)
 			{
-				serverCmd.m_sendActualStateArgs.m_actualStateQdot[totalDegreeOfFreedomU++] = mb->getJointVelMultiDof(l)[d];
+				stateDetails->m_jointMotorForce[totalDegreeOfFreedomU] = 0;
+
+				if (mb->getLink(l).m_jointType == btMultibodyLink::eSpherical)
+				{
+					btMultiBodySphericalJointMotor* motor = (btMultiBodySphericalJointMotor*)mb->getLink(l).m_userPtr;
+					if (motor)
+					{
+						btScalar impulse = motor->getAppliedImpulse(d);
+						btScalar force = impulse / m_data->m_physicsDeltaTime;
+						stateDetails->m_jointMotorForceMultiDof[totalDegreeOfFreedomU] = force;
+					}
+				}
+				else
+				{
+					if (supportsJointMotor(mb, l))
+					{
+						btMultiBodyJointMotor* motor = (btMultiBodyJointMotor*)body->m_multiBody->getLink(l).m_userPtr;
+
+						if (motor && m_data->m_physicsDeltaTime > btScalar(0))
+						{
+							btScalar force = motor->getAppliedImpulse(0) / m_data->m_physicsDeltaTime;
+							stateDetails->m_jointMotorForceMultiDof[totalDegreeOfFreedomU] = force;
+						}
+					}
+				}
+
+				stateDetails->m_actualStateQdot[totalDegreeOfFreedomU++] = mb->getJointVelMultiDof(l)[d];
 			}
 
 			if (0 == mb->getLink(l).m_jointFeedback)
 			{
 				for (int d = 0; d < 6; d++)
 				{
-					serverCmd.m_sendActualStateArgs.m_jointReactionForces[l * 6 + d] = 0;
+					stateDetails->m_jointReactionForces[l * 6 + d] = 0;
 				}
 			}
 			else
@@ -6430,16 +6479,16 @@ bool PhysicsServerCommandProcessor::processRequestActualStateCommand(const struc
 				btVector3 sensedForce = mb->getLink(l).m_jointFeedback->m_reactionForces.getLinear();
 				btVector3 sensedTorque = mb->getLink(l).m_jointFeedback->m_reactionForces.getAngular();
 
-				serverCmd.m_sendActualStateArgs.m_jointReactionForces[l * 6 + 0] = sensedForce[0];
-				serverCmd.m_sendActualStateArgs.m_jointReactionForces[l * 6 + 1] = sensedForce[1];
-				serverCmd.m_sendActualStateArgs.m_jointReactionForces[l * 6 + 2] = sensedForce[2];
+				stateDetails->m_jointReactionForces[l * 6 + 0] = sensedForce[0];
+				stateDetails->m_jointReactionForces[l * 6 + 1] = sensedForce[1];
+				stateDetails->m_jointReactionForces[l * 6 + 2] = sensedForce[2];
 
-				serverCmd.m_sendActualStateArgs.m_jointReactionForces[l * 6 + 3] = sensedTorque[0];
-				serverCmd.m_sendActualStateArgs.m_jointReactionForces[l * 6 + 4] = sensedTorque[1];
-				serverCmd.m_sendActualStateArgs.m_jointReactionForces[l * 6 + 5] = sensedTorque[2];
+				stateDetails->m_jointReactionForces[l * 6 + 3] = sensedTorque[0];
+				stateDetails->m_jointReactionForces[l * 6 + 4] = sensedTorque[1];
+				stateDetails->m_jointReactionForces[l * 6 + 5] = sensedTorque[2];
 			}
 
-			serverCmd.m_sendActualStateArgs.m_jointMotorForce[l] = 0;
+			stateDetails->m_jointMotorForce[l] = 0;
 
 			if (supportsJointMotor(mb, l))
 			{
@@ -6448,7 +6497,7 @@ bool PhysicsServerCommandProcessor::processRequestActualStateCommand(const struc
 				if (motor && m_data->m_physicsDeltaTime > btScalar(0))
 				{
 					btScalar force = motor->getAppliedImpulse(0) / m_data->m_physicsDeltaTime;
-					serverCmd.m_sendActualStateArgs.m_jointMotorForce[l] =
+					stateDetails->m_jointMotorForce[l] =
 						force;
 					//if (force>0)
 					//{
@@ -6462,13 +6511,13 @@ bool PhysicsServerCommandProcessor::processRequestActualStateCommand(const struc
 			btVector3 linkCOMOrigin = mb->getLink(l).m_cachedWorldTransform.getOrigin();
 			btQuaternion linkCOMRotation = mb->getLink(l).m_cachedWorldTransform.getRotation();
 
-			serverCmd.m_sendActualStateArgs.m_linkState[l * 7 + 0] = linkCOMOrigin.getX();
-			serverCmd.m_sendActualStateArgs.m_linkState[l * 7 + 1] = linkCOMOrigin.getY();
-			serverCmd.m_sendActualStateArgs.m_linkState[l * 7 + 2] = linkCOMOrigin.getZ();
-			serverCmd.m_sendActualStateArgs.m_linkState[l * 7 + 3] = linkCOMRotation.x();
-			serverCmd.m_sendActualStateArgs.m_linkState[l * 7 + 4] = linkCOMRotation.y();
-			serverCmd.m_sendActualStateArgs.m_linkState[l * 7 + 5] = linkCOMRotation.z();
-			serverCmd.m_sendActualStateArgs.m_linkState[l * 7 + 6] = linkCOMRotation.w();
+			stateDetails->m_linkState[l * 7 + 0] = linkCOMOrigin.getX();
+			stateDetails->m_linkState[l * 7 + 1] = linkCOMOrigin.getY();
+			stateDetails->m_linkState[l * 7 + 2] = linkCOMOrigin.getZ();
+			stateDetails->m_linkState[l * 7 + 3] = linkCOMRotation.x();
+			stateDetails->m_linkState[l * 7 + 4] = linkCOMRotation.y();
+			stateDetails->m_linkState[l * 7 + 5] = linkCOMRotation.z();
+			stateDetails->m_linkState[l * 7 + 6] = linkCOMRotation.w();
 
 			btVector3 worldLinVel(0, 0, 0);
 			btVector3 worldAngVel(0, 0, 0);
@@ -6480,21 +6529,21 @@ bool PhysicsServerCommandProcessor::processRequestActualStateCommand(const struc
 				worldAngVel = linkRotMat * omega[l + 1];
 			}
 
-			serverCmd.m_sendActualStateArgs.m_linkWorldVelocities[l * 6 + 0] = worldLinVel[0];
-			serverCmd.m_sendActualStateArgs.m_linkWorldVelocities[l * 6 + 1] = worldLinVel[1];
-			serverCmd.m_sendActualStateArgs.m_linkWorldVelocities[l * 6 + 2] = worldLinVel[2];
-			serverCmd.m_sendActualStateArgs.m_linkWorldVelocities[l * 6 + 3] = worldAngVel[0];
-			serverCmd.m_sendActualStateArgs.m_linkWorldVelocities[l * 6 + 4] = worldAngVel[1];
-			serverCmd.m_sendActualStateArgs.m_linkWorldVelocities[l * 6 + 5] = worldAngVel[2];
+			stateDetails->m_linkWorldVelocities[l * 6 + 0] = worldLinVel[0];
+			stateDetails->m_linkWorldVelocities[l * 6 + 1] = worldLinVel[1];
+			stateDetails->m_linkWorldVelocities[l * 6 + 2] = worldLinVel[2];
+			stateDetails->m_linkWorldVelocities[l * 6 + 3] = worldAngVel[0];
+			stateDetails->m_linkWorldVelocities[l * 6 + 4] = worldAngVel[1];
+			stateDetails->m_linkWorldVelocities[l * 6 + 5] = worldAngVel[2];
 
-			serverCmd.m_sendActualStateArgs.m_linkLocalInertialFrames[l * 7 + 0] = linkLocalInertialOrigin.getX();
-			serverCmd.m_sendActualStateArgs.m_linkLocalInertialFrames[l * 7 + 1] = linkLocalInertialOrigin.getY();
-			serverCmd.m_sendActualStateArgs.m_linkLocalInertialFrames[l * 7 + 2] = linkLocalInertialOrigin.getZ();
+			stateDetails->m_linkLocalInertialFrames[l * 7 + 0] = linkLocalInertialOrigin.getX();
+			stateDetails->m_linkLocalInertialFrames[l * 7 + 1] = linkLocalInertialOrigin.getY();
+			stateDetails->m_linkLocalInertialFrames[l * 7 + 2] = linkLocalInertialOrigin.getZ();
 
-			serverCmd.m_sendActualStateArgs.m_linkLocalInertialFrames[l * 7 + 3] = linkLocalInertialRotation.x();
-			serverCmd.m_sendActualStateArgs.m_linkLocalInertialFrames[l * 7 + 4] = linkLocalInertialRotation.y();
-			serverCmd.m_sendActualStateArgs.m_linkLocalInertialFrames[l * 7 + 5] = linkLocalInertialRotation.z();
-			serverCmd.m_sendActualStateArgs.m_linkLocalInertialFrames[l * 7 + 6] = linkLocalInertialRotation.w();
+			stateDetails->m_linkLocalInertialFrames[l * 7 + 3] = linkLocalInertialRotation.x();
+			stateDetails->m_linkLocalInertialFrames[l * 7 + 4] = linkLocalInertialRotation.y();
+			stateDetails->m_linkLocalInertialFrames[l * 7 + 5] = linkLocalInertialRotation.z();
+			stateDetails->m_linkLocalInertialFrames[l * 7 + 6] = linkLocalInertialRotation.w();
 		}
 
 		serverCmd.m_sendActualStateArgs.m_numDegreeOfFreedomQ = totalDegreeOfFreedomQ;
@@ -6509,35 +6558,36 @@ bool PhysicsServerCommandProcessor::processRequestActualStateCommand(const struc
 			btRigidBody* rb = body->m_rigidBody;
 			SharedMemoryStatus& serverCmd = serverStatusOut;
 			serverCmd.m_type = CMD_ACTUAL_STATE_UPDATE_COMPLETED;
-
+			
 			serverCmd.m_sendActualStateArgs.m_bodyUniqueId = bodyUniqueId;
 			serverCmd.m_sendActualStateArgs.m_numLinks = 0;
+			serverCmd.m_sendActualStateArgs.m_stateDetails = 0;
 
 			int totalDegreeOfFreedomQ = 0;
 			int totalDegreeOfFreedomU = 0;
 
 			btTransform tr = rb->getWorldTransform();
 			//base position in world space, carthesian
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[0] = tr.getOrigin()[0];
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[1] = tr.getOrigin()[1];
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[2] = tr.getOrigin()[2];
+			stateDetails->m_actualStateQ[0] = tr.getOrigin()[0];
+			stateDetails->m_actualStateQ[1] = tr.getOrigin()[1];
+			stateDetails->m_actualStateQ[2] = tr.getOrigin()[2];
 
 			//base orientation, quaternion x,y,z,w, in world space, carthesian
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[3] = tr.getRotation()[0];
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[4] = tr.getRotation()[1];
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[5] = tr.getRotation()[2];
-			serverCmd.m_sendActualStateArgs.m_actualStateQ[6] = tr.getRotation()[3];
+			stateDetails->m_actualStateQ[3] = tr.getRotation()[0];
+			stateDetails->m_actualStateQ[4] = tr.getRotation()[1];
+			stateDetails->m_actualStateQ[5] = tr.getRotation()[2];
+			stateDetails->m_actualStateQ[6] = tr.getRotation()[3];
 			totalDegreeOfFreedomQ += 7;  //pos + quaternion
 
 			//base linear velocity (in world space, carthesian)
-			serverCmd.m_sendActualStateArgs.m_actualStateQdot[0] = rb->getLinearVelocity()[0];
-			serverCmd.m_sendActualStateArgs.m_actualStateQdot[1] = rb->getLinearVelocity()[1];
-			serverCmd.m_sendActualStateArgs.m_actualStateQdot[2] = rb->getLinearVelocity()[2];
+			stateDetails->m_actualStateQdot[0] = rb->getLinearVelocity()[0];
+			stateDetails->m_actualStateQdot[1] = rb->getLinearVelocity()[1];
+			stateDetails->m_actualStateQdot[2] = rb->getLinearVelocity()[2];
 
 			//base angular velocity (in world space, carthesian)
-			serverCmd.m_sendActualStateArgs.m_actualStateQdot[3] = rb->getAngularVelocity()[0];
-			serverCmd.m_sendActualStateArgs.m_actualStateQdot[4] = rb->getAngularVelocity()[1];
-			serverCmd.m_sendActualStateArgs.m_actualStateQdot[5] = rb->getAngularVelocity()[2];
+			stateDetails->m_actualStateQdot[3] = rb->getAngularVelocity()[0];
+			stateDetails->m_actualStateQdot[4] = rb->getAngularVelocity()[1];
+			stateDetails->m_actualStateQdot[5] = rb->getAngularVelocity()[2];
 			totalDegreeOfFreedomU += 6;  //3 linear and 3 angular DOF
 
 			serverCmd.m_sendActualStateArgs.m_numDegreeOfFreedomQ = totalDegreeOfFreedomQ;
@@ -7048,6 +7098,36 @@ bool PhysicsServerCommandProcessor::processLoadSDFCommand(const struct SharedMem
 
 bool PhysicsServerCommandProcessor::processCreateMultiBodyCommand(const struct SharedMemoryCommand& clientCmd, struct SharedMemoryStatus& serverStatusOut, char* bufferServerToClient, int bufferSizeInBytes)
 {
+	if (clientCmd.m_createMultiBodyArgs.m_numBatchObjects > 0)
+	{
+		//batch of objects, to speed up creation time
+		bool result = false;
+		SharedMemoryCommand clientCmd2 = clientCmd;
+		int baseLinkIndex = clientCmd.m_createMultiBodyArgs.m_baseLinkIndex;
+		double* basePositionAndOrientations = (double*)bufferServerToClient;
+		for (int i = 0; i < clientCmd2.m_createMultiBodyArgs.m_numBatchObjects; i++)
+		{
+			clientCmd2.m_createMultiBodyArgs.m_linkPositions[baseLinkIndex * 3 + 0] = basePositionAndOrientations[0 + i * 3];
+			clientCmd2.m_createMultiBodyArgs.m_linkPositions[baseLinkIndex * 3 + 1] = basePositionAndOrientations[1 + i * 3];
+			clientCmd2.m_createMultiBodyArgs.m_linkPositions[baseLinkIndex * 3 + 2] = basePositionAndOrientations[2 + i * 3];
+			if (i == (clientCmd2.m_createMultiBodyArgs.m_numBatchObjects - 1))
+			{
+				result = processCreateMultiBodyCommandSingle(clientCmd2, serverStatusOut, bufferServerToClient, bufferSizeInBytes);
+			}
+			else
+			{
+				result = processCreateMultiBodyCommandSingle(clientCmd2, serverStatusOut, 0, 0);
+			}
+		}
+		m_data->m_guiHelper->autogenerateGraphicsObjects(this->m_data->m_dynamicsWorld);
+		return result;
+	}
+	return processCreateMultiBodyCommandSingle(clientCmd, serverStatusOut, bufferServerToClient, bufferSizeInBytes);
+}
+
+bool PhysicsServerCommandProcessor::processCreateMultiBodyCommandSingle(const struct SharedMemoryCommand& clientCmd, struct SharedMemoryStatus& serverStatusOut, char* bufferServerToClient, int bufferSizeInBytes)
+{
+	BT_PROFILE("processCreateMultiBodyCommand2");
 	bool hasStatus = true;
 
 	serverStatusOut.m_type = CMD_CREATE_MULTI_BODY_FAILED;
@@ -7072,10 +7152,16 @@ bool PhysicsServerCommandProcessor::processCreateMultiBodyCommand(const struct S
 
 
 
-		bool ok = processImportedObjects("memory", bufferServerToClient, bufferSizeInBytes, useMultiBody, flags, u2b);
+
+		bool ok = 0;
+		{
+			BT_PROFILE("processImportedObjects");
+			ok = processImportedObjects("memory", bufferServerToClient, bufferSizeInBytes, useMultiBody, flags, u2b);
+		}
 
 		if (ok)
 		{
+			BT_PROFILE("post process");
 			int bodyUniqueId = -1;
 
 			if (m_data->m_sdfRecentLoadedBodies.size() == 1)
@@ -7085,15 +7171,23 @@ bool PhysicsServerCommandProcessor::processCreateMultiBodyCommand(const struct S
 			m_data->m_sdfRecentLoadedBodies.clear();
 			if (bodyUniqueId >= 0)
 			{
-				m_data->m_guiHelper->autogenerateGraphicsObjects(this->m_data->m_dynamicsWorld);
+				
 				serverStatusOut.m_type = CMD_CREATE_MULTI_BODY_COMPLETED;
+				if (bufferSizeInBytes>0 && serverStatusOut.m_numDataStreamBytes==0)
+				{
+					{
+						BT_PROFILE("autogenerateGraphicsObjects");
+						m_data->m_guiHelper->autogenerateGraphicsObjects(this->m_data->m_dynamicsWorld);
+					}
+					
+					BT_PROFILE("createBodyInfoStream");
+					int streamSizeInBytes = createBodyInfoStream(bodyUniqueId, bufferServerToClient, bufferSizeInBytes);
+					serverStatusOut.m_numDataStreamBytes = streamSizeInBytes;
 
-				int streamSizeInBytes = createBodyInfoStream(bodyUniqueId, bufferServerToClient, bufferSizeInBytes);
-				serverStatusOut.m_numDataStreamBytes = streamSizeInBytes;
-
-				serverStatusOut.m_dataStreamArguments.m_bodyUniqueId = bodyUniqueId;
-				InternalBodyData* body = m_data->m_bodyHandles.getHandle(bodyUniqueId);
-				strcpy(serverStatusOut.m_dataStreamArguments.m_bodyName, body->m_bodyName.c_str());
+					serverStatusOut.m_dataStreamArguments.m_bodyUniqueId = bodyUniqueId;
+					InternalBodyData* body = m_data->m_bodyHandles.getHandle(bodyUniqueId);
+					strcpy(serverStatusOut.m_dataStreamArguments.m_bodyName, body->m_bodyName.c_str());
+				}
 			}
 		}
 
@@ -7511,15 +7605,17 @@ bool PhysicsServerCommandProcessor::processForwardDynamicsCommand(const struct S
 	}
 
 	btScalar deltaTimeScaled = m_data->m_physicsDeltaTime * simTimeScalingFactor;
-
+	
 	int numSteps = 0;
 	if (m_data->m_numSimulationSubSteps > 0)
 	{
 		numSteps = m_data->m_dynamicsWorld->stepSimulation(deltaTimeScaled, m_data->m_numSimulationSubSteps, m_data->m_physicsDeltaTime / m_data->m_numSimulationSubSteps);
+		m_data->m_simulationTimestamp += deltaTimeScaled;
 	}
 	else
 	{
 		numSteps = m_data->m_dynamicsWorld->stepSimulation(deltaTimeScaled, 0);
+		m_data->m_simulationTimestamp += deltaTimeScaled;
 	}
 
 	if (numSteps > 0)
@@ -7528,6 +7624,24 @@ bool PhysicsServerCommandProcessor::processForwardDynamicsCommand(const struct S
 	}
 
 	SharedMemoryStatus& serverCmd = serverStatusOut;
+
+	serverCmd.m_forwardDynamicsAnalyticsArgs.m_numSteps = numSteps;
+
+	btAlignedObjectArray<btSolverAnalyticsData> islandAnalyticsData;
+
+	m_data->m_dynamicsWorld->getAnalyticsData(islandAnalyticsData);
+	serverCmd.m_forwardDynamicsAnalyticsArgs.m_numIslands = islandAnalyticsData.size();
+	int numIslands = btMin(islandAnalyticsData.size(), MAX_ISLANDS_ANALYTICS);
+	
+	for (int i=0;i<numIslands;i++)
+	{
+		serverCmd.m_forwardDynamicsAnalyticsArgs.m_numSolverCalls = islandAnalyticsData[i].m_numSolverCalls;
+		serverCmd.m_forwardDynamicsAnalyticsArgs.m_islandData[i].m_islandId = islandAnalyticsData[i].m_islandId;
+		serverCmd.m_forwardDynamicsAnalyticsArgs.m_islandData[i].m_numBodies = islandAnalyticsData[i].m_numBodies;
+		serverCmd.m_forwardDynamicsAnalyticsArgs.m_islandData[i].m_numIterationsUsed = islandAnalyticsData[i].m_numIterationsUsed;
+		serverCmd.m_forwardDynamicsAnalyticsArgs.m_islandData[i].m_remainingLeastSquaresResidual = islandAnalyticsData[i].m_remainingLeastSquaresResidual;
+		serverCmd.m_forwardDynamicsAnalyticsArgs.m_islandData[i].m_numContactManifolds = islandAnalyticsData[i].m_numContactManifolds;
+	}
 	serverCmd.m_type = CMD_STEP_FORWARD_SIMULATION_COMPLETED;
 
 	return hasStatus;
@@ -7572,6 +7686,9 @@ bool PhysicsServerCommandProcessor::processChangeDynamicsInfoCommand(const struc
 	btVector3 newLocalInertiaDiagonal(clientCmd.m_changeDynamicsInfoArgs.m_localInertiaDiagonal[0],
 									  clientCmd.m_changeDynamicsInfoArgs.m_localInertiaDiagonal[1],
 									  clientCmd.m_changeDynamicsInfoArgs.m_localInertiaDiagonal[2]);
+	btVector3 anisotropicFriction(clientCmd.m_changeDynamicsInfoArgs.m_anisotropicFriction[0],
+		clientCmd.m_changeDynamicsInfoArgs.m_anisotropicFriction[1],
+		clientCmd.m_changeDynamicsInfoArgs.m_anisotropicFriction[2]);
 
 	btAssert(bodyUniqueId >= 0);
 
@@ -7599,6 +7716,15 @@ bool PhysicsServerCommandProcessor::processChangeDynamicsInfoCommand(const struc
 			{
 				mb->setCanSleep(false);
 			}
+			if (clientCmd.m_changeDynamicsInfoArgs.m_activationState & eActivationStateEnableWakeup)
+			{
+				mb->setCanWakeup(true);
+			}
+			if (clientCmd.m_changeDynamicsInfoArgs.m_activationState & eActivationStateDisableWakeup)
+			{
+				mb->setCanWakeup(false);
+			}
+			
 		}
 
 		if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_LINEAR_DAMPING)
@@ -7695,6 +7821,16 @@ bool PhysicsServerCommandProcessor::processChangeDynamicsInfoCommand(const struc
 			{
 				mb->setBaseInertia(newLocalInertiaDiagonal);
 			}
+			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_ANISOTROPIC_FRICTION)
+			{
+				mb->getBaseCollider()->setAnisotropicFriction(anisotropicFriction);
+			}
+
+			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_MAX_JOINT_VELOCITY)
+			{
+				mb->setMaxCoordinateVelocity(clientCmd.m_changeDynamicsInfoArgs.m_maxJointVelocity);
+			}
+			
 		}
 		else
 		{
@@ -7737,6 +7873,12 @@ bool PhysicsServerCommandProcessor::processChangeDynamicsInfoCommand(const struc
 						mb->getLinkCollider(linkIndex)->setContactStiffnessAndDamping(clientCmd.m_changeDynamicsInfoArgs.m_contactStiffness, clientCmd.m_changeDynamicsInfoArgs.m_contactDamping);
 					}
 				}
+
+				if (clientCmd.m_updateFlags &CHANGE_DYNAMICS_INFO_SET_JOINT_DAMPING)
+				{
+					mb->getLink(linkIndex).m_jointDamping = clientCmd.m_changeDynamicsInfoArgs.m_jointDamping;
+				}
+
 				if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_MASS)
 				{
 					mb->getLink(linkIndex).m_mass = mass;
@@ -7751,105 +7893,135 @@ bool PhysicsServerCommandProcessor::processChangeDynamicsInfoCommand(const struc
 				{
 					mb->getLink(linkIndex).m_inertiaLocal = newLocalInertiaDiagonal;
 				}
+				if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_ANISOTROPIC_FRICTION)
+				{
+					mb->getLinkCollider(linkIndex)->setAnisotropicFriction(anisotropicFriction);
+				}
 			}
 		}
 	}
 	else
 	{
+
+		btRigidBody* rb = 0;
 		if (body && body->m_rigidBody)
+		{
+			if (linkIndex == -1)
+			{
+				rb = body->m_rigidBody;
+			}
+			else
+			{
+				if (linkIndex >= 0 && linkIndex < body->m_rigidBodyJoints.size())
+				{
+					btRigidBody* parentRb = &body->m_rigidBodyJoints[linkIndex]->getRigidBodyA();
+					btRigidBody* childRb = &body->m_rigidBodyJoints[linkIndex]->getRigidBodyB();
+					rb = childRb;
+				}
+				
+			}
+		}
+
+		if (rb)
 		{
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_ACTIVATION_STATE)
 			{
 				if (clientCmd.m_changeDynamicsInfoArgs.m_activationState & eActivationStateEnableSleeping)
 				{
-					body->m_rigidBody->forceActivationState(ACTIVE_TAG);
+					rb->forceActivationState(ACTIVE_TAG);
 				}
 				if (clientCmd.m_changeDynamicsInfoArgs.m_activationState & eActivationStateDisableSleeping)
 				{
-					body->m_rigidBody->forceActivationState(DISABLE_DEACTIVATION);
+					rb->forceActivationState(DISABLE_DEACTIVATION);
 				}
 				if (clientCmd.m_changeDynamicsInfoArgs.m_activationState & eActivationStateWakeUp)
 				{
-					body->m_rigidBody->forceActivationState(ACTIVE_TAG);
+					rb->forceActivationState(ACTIVE_TAG);
 				}
 				if (clientCmd.m_changeDynamicsInfoArgs.m_activationState & eActivationStateSleep)
 				{
-					body->m_rigidBody->forceActivationState(ISLAND_SLEEPING);
+					rb->forceActivationState(ISLAND_SLEEPING);
 				}
 			}
 
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_LINEAR_DAMPING)
 			{
-				btScalar angDamping = body->m_rigidBody->getAngularDamping();
-				body->m_rigidBody->setDamping(clientCmd.m_changeDynamicsInfoArgs.m_linearDamping, angDamping);
+				btScalar angDamping = rb->getAngularDamping();
+				rb->setDamping(clientCmd.m_changeDynamicsInfoArgs.m_linearDamping, angDamping);
 			}
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_ANGULAR_DAMPING)
 			{
-				btScalar linDamping = body->m_rigidBody->getLinearDamping();
-				body->m_rigidBody->setDamping(linDamping, clientCmd.m_changeDynamicsInfoArgs.m_angularDamping);
+				btScalar linDamping = rb->getLinearDamping();
+				rb->setDamping(linDamping, clientCmd.m_changeDynamicsInfoArgs.m_angularDamping);
 			}
 
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_CONTACT_STIFFNESS_AND_DAMPING)
 			{
-				body->m_rigidBody->setContactStiffnessAndDamping(clientCmd.m_changeDynamicsInfoArgs.m_contactStiffness, clientCmd.m_changeDynamicsInfoArgs.m_contactDamping);
+				rb->setContactStiffnessAndDamping(clientCmd.m_changeDynamicsInfoArgs.m_contactStiffness, clientCmd.m_changeDynamicsInfoArgs.m_contactDamping);
 			}
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_RESTITUTION)
 			{
-				body->m_rigidBody->setRestitution(restitution);
+				rb->setRestitution(restitution);
 			}
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_LATERAL_FRICTION)
 			{
-				body->m_rigidBody->setFriction(lateralFriction);
+				rb->setFriction(lateralFriction);
 			}
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_SPINNING_FRICTION)
 			{
-				body->m_rigidBody->setSpinningFriction(spinningFriction);
+				rb->setSpinningFriction(spinningFriction);
 			}
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_ROLLING_FRICTION)
 			{
-				body->m_rigidBody->setRollingFriction(rollingFriction);
+				rb->setRollingFriction(rollingFriction);
 			}
 
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_FRICTION_ANCHOR)
 			{
 				if (clientCmd.m_changeDynamicsInfoArgs.m_frictionAnchor)
 				{
-					body->m_rigidBody->setCollisionFlags(body->m_rigidBody->getCollisionFlags() | btCollisionObject::CF_HAS_FRICTION_ANCHOR);
+					rb->setCollisionFlags(rb->getCollisionFlags() | btCollisionObject::CF_HAS_FRICTION_ANCHOR);
 				}
 				else
 				{
-					body->m_rigidBody->setCollisionFlags(body->m_rigidBody->getCollisionFlags() & ~btCollisionObject::CF_HAS_FRICTION_ANCHOR);
+					rb->setCollisionFlags(rb->getCollisionFlags() & ~btCollisionObject::CF_HAS_FRICTION_ANCHOR);
 				}
 			}
 
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_MASS)
 			{
 				btVector3 localInertia;
-				if (body->m_rigidBody->getCollisionShape())
+				if (rb->getCollisionShape())
 				{
-					body->m_rigidBody->getCollisionShape()->calculateLocalInertia(mass, localInertia);
+					rb->getCollisionShape()->calculateLocalInertia(mass, localInertia);
 				}
-				body->m_rigidBody->setMassProps(mass, localInertia);
+				rb->setMassProps(mass, localInertia);
 			}
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_LOCAL_INERTIA_DIAGONAL)
 			{
-				btScalar orgMass = body->m_rigidBody->getInvMass();
+				btScalar orgMass = rb->getInvMass();
 				if (orgMass > 0)
 				{
-					body->m_rigidBody->setMassProps(mass, newLocalInertiaDiagonal);
+					rb->setMassProps(mass, newLocalInertiaDiagonal);
 				}
 			}
-
+			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_ANISOTROPIC_FRICTION)
+			{
+				rb->setAnisotropicFriction(anisotropicFriction);
+			}
+			
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_CONTACT_PROCESSING_THRESHOLD)
 			{
-				body->m_rigidBody->setContactProcessingThreshold(clientCmd.m_changeDynamicsInfoArgs.m_contactProcessingThreshold);
+				rb->setContactProcessingThreshold(clientCmd.m_changeDynamicsInfoArgs.m_contactProcessingThreshold);
 			}
+
+			
 
 			if (clientCmd.m_updateFlags & CHANGE_DYNAMICS_INFO_SET_CCD_SWEPT_SPHERE_RADIUS)
 			{
-				body->m_rigidBody->setCcdSweptSphereRadius(clientCmd.m_changeDynamicsInfoArgs.m_ccdSweptSphereRadius);
+				rb->setCcdSweptSphereRadius(clientCmd.m_changeDynamicsInfoArgs.m_ccdSweptSphereRadius);
 				//for a given sphere radius, use a motion threshold of half the radius, before the ccd algorithm is enabled
-				body->m_rigidBody->setCcdMotionThreshold(clientCmd.m_changeDynamicsInfoArgs.m_ccdSweptSphereRadius / 2.);
+				rb->setCcdMotionThreshold(clientCmd.m_changeDynamicsInfoArgs.m_ccdSweptSphereRadius / 2.);
 			}
 		}
 	}
@@ -8011,6 +8183,7 @@ bool PhysicsServerCommandProcessor::processRequestPhysicsSimulationParametersCom
 	serverCmd.m_simulationParameterResultArgs.m_allowedCcdPenetration = m_data->m_dynamicsWorld->getDispatchInfo().m_allowedCcdPenetration;
 	serverCmd.m_simulationParameterResultArgs.m_collisionFilterMode = m_data->m_broadphaseCollisionFilterCallback->m_filterMode;
 	serverCmd.m_simulationParameterResultArgs.m_deltaTime = m_data->m_physicsDeltaTime;
+        serverCmd.m_simulationParameterResultArgs.m_simulationTimestamp = m_data->m_simulationTimestamp;
 	serverCmd.m_simulationParameterResultArgs.m_contactBreakingThreshold = gContactBreakingThreshold;
 	serverCmd.m_simulationParameterResultArgs.m_contactSlop = m_data->m_dynamicsWorld->getSolverInfo().m_linearSlop;
 	serverCmd.m_simulationParameterResultArgs.m_enableSAT = m_data->m_dynamicsWorld->getDispatchInfo().m_enableSatConvex;
@@ -8056,6 +8229,7 @@ bool PhysicsServerCommandProcessor::processSendPhysicsParametersCommand(const st
 	bool hasStatus = true;
 
 	BT_PROFILE("CMD_SEND_PHYSICS_SIMULATION_PARAMETERS");
+
 
 	if (clientCmd.m_updateFlags & SIM_PARAM_ENABLE_CONE_FRICTION)
 	{
@@ -8192,6 +8366,11 @@ bool PhysicsServerCommandProcessor::processSendPhysicsParametersCommand(const st
 		}
 	}
 
+	if (clientCmd.m_updateFlags & SIM_PARAM_CONSTRAINT_MIN_SOLVER_ISLAND_SIZE)
+	{
+		m_data->m_dynamicsWorld->getSolverInfo().m_minimumSolverBatchSize = clientCmd.m_physSimParamArgs.m_minimumSolverIslandSize;
+	}
+
 	if (clientCmd.m_updateFlags & SIM_PARAM_UPDATE_COLLISION_FILTER_MODE)
 	{
 		m_data->m_broadphaseCollisionFilterCallback->m_filterMode = clientCmd.m_physSimParamArgs.m_collisionFilterMode;
@@ -8247,6 +8426,11 @@ bool PhysicsServerCommandProcessor::processSendPhysicsParametersCommand(const st
 		m_data->m_pluginManager.getFileIOInterface()->enableFileCaching(clientCmd.m_physSimParamArgs.m_enableFileCaching!=0);
 	}
 
+	if (clientCmd.m_updateFlags & SIM_PARAM_REPORT_CONSTRAINT_SOLVER_ANALYTICS)
+	{
+		m_data->m_dynamicsWorld->getSolverInfo().m_reportSolverAnalytics = clientCmd.m_physSimParamArgs.m_reportSolverAnalytics;
+	}
+	
 	SharedMemoryStatus& serverCmd = serverStatusOut;
 	serverCmd.m_type = CMD_CLIENT_COMMAND_COMPLETED;
 	return hasStatus;
@@ -10617,7 +10801,7 @@ bool PhysicsServerCommandProcessor::processLoadTextureCommand(const struct Share
 
 bool PhysicsServerCommandProcessor::processSaveStateCommand(const struct SharedMemoryCommand& clientCmd, struct SharedMemoryStatus& serverStatusOut, char* bufferServerToClient, int bufferSizeInBytes)
 {
-	BT_PROFILE("CMD_RESTORE_STATE");
+	BT_PROFILE("CMD_SAVE_STATE");
 	bool hasStatus = true;
 	SharedMemoryStatus& serverCmd = serverStatusOut;
 	serverCmd.m_type = CMD_SAVE_STATE_FAILED;
@@ -10631,14 +10815,56 @@ bool PhysicsServerCommandProcessor::processSaveStateCommand(const struct SharedM
 	if (bulletFile->ok())
 	{
 		serverCmd.m_type = CMD_SAVE_STATE_COMPLETED;
-		serverCmd.m_saveStateResultArgs.m_stateId = m_data->m_savedStates.size();
+		//re-use state if available
+		int reuseStateId = -1;
+		for (int i = 0; i < m_data->m_savedStates.size(); i++)
+		{
+			if (m_data->m_savedStates[i].m_bulletFile == 0)
+			{
+				reuseStateId = i;
+				break;
+			}
+		}
 		SaveStateData sd;
 		sd.m_bulletFile = bulletFile;
 		sd.m_serializer = ser;
-		m_data->m_savedStates.push_back(sd);
+		if (reuseStateId >= 0)
+		{
+			serverCmd.m_saveStateResultArgs.m_stateId = reuseStateId;
+			m_data->m_savedStates[reuseStateId] = sd;
+		}
+		else
+		{
+			serverCmd.m_saveStateResultArgs.m_stateId = m_data->m_savedStates.size();
+			m_data->m_savedStates.push_back(sd);
+		}
 	}
 	return hasStatus;
 }
+
+
+bool PhysicsServerCommandProcessor::processRemoveStateCommand(const struct SharedMemoryCommand& clientCmd, struct SharedMemoryStatus& serverStatusOut, char* bufferServerToClient, int bufferSizeInBytes)
+{
+	BT_PROFILE("CMD_REMOVE_STATE");
+	bool hasStatus = true;
+	SharedMemoryStatus& serverCmd = serverStatusOut;
+	serverCmd.m_type = CMD_REMOVE_STATE_FAILED;
+	
+	if (clientCmd.m_loadStateArguments.m_stateId >= 0)
+	{
+		if (clientCmd.m_loadStateArguments.m_stateId < m_data->m_savedStates.size())
+		{
+			SaveStateData& sd = m_data->m_savedStates[clientCmd.m_loadStateArguments.m_stateId];
+			delete sd.m_bulletFile;
+			delete sd.m_serializer;
+			sd.m_bulletFile = 0;
+			sd.m_serializer = 0;
+			serverCmd.m_type = CMD_REMOVE_STATE_COMPLETED;
+		}
+	}
+	return hasStatus;
+}
+
 
 bool PhysicsServerCommandProcessor::processRestoreStateCommand(const struct SharedMemoryCommand& clientCmd, struct SharedMemoryStatus& serverStatusOut, char* bufferServerToClient, int bufferSizeInBytes)
 {
@@ -10657,7 +10883,10 @@ bool PhysicsServerCommandProcessor::processRestoreStateCommand(const struct Shar
 		if (clientCmd.m_loadStateArguments.m_stateId < m_data->m_savedStates.size())
 		{
 			bParse::btBulletFile* bulletFile = m_data->m_savedStates[clientCmd.m_loadStateArguments.m_stateId].m_bulletFile;
-			ok = importer->convertAllObjects(bulletFile);
+			if (bulletFile)
+			{
+				ok = importer->convertAllObjects(bulletFile);
+			}
 		}
 	}
 	else
@@ -10960,6 +11189,7 @@ bool PhysicsServerCommandProcessor::processCommand(const struct SharedMemoryComm
 			hasStatus = processCreateVisualShapeCommand(clientCmd, serverStatusOut, bufferServerToClient, bufferSizeInBytes);
 			break;
 		}
+		
 		case CMD_CREATE_MULTI_BODY:
 		{
 			hasStatus = processCreateMultiBodyCommand(clientCmd, serverStatusOut, bufferServerToClient, bufferSizeInBytes);
@@ -11165,6 +11395,11 @@ bool PhysicsServerCommandProcessor::processCommand(const struct SharedMemoryComm
 		case CMD_SAVE_STATE:
 		{
 			hasStatus = processSaveStateCommand(clientCmd, serverStatusOut, bufferServerToClient, bufferSizeInBytes);
+			break;
+		}
+		case CMD_REMOVE_STATE:
+		{
+			hasStatus = processRemoveStateCommand(clientCmd, serverStatusOut, bufferServerToClient, bufferSizeInBytes);
 			break;
 		}
 
@@ -11561,7 +11796,9 @@ void PhysicsServerCommandProcessor::stepSimulationRealTime(double dtInSec, const
 			gSubStep = m_data->m_physicsDeltaTime;
 		}
 
-		int numSteps = m_data->m_dynamicsWorld->stepSimulation(dtInSec * simTimeScalingFactor, maxSteps, gSubStep);
+		btScalar deltaTimeScaled = dtInSec * simTimeScalingFactor;
+                int numSteps = m_data->m_dynamicsWorld->stepSimulation(deltaTimeScaled, maxSteps, gSubStep);
+                m_data->m_simulationTimestamp += deltaTimeScaled;
 		gDroppedSimulationSteps += numSteps > maxSteps ? numSteps - maxSteps : 0;
 
 		if (numSteps)
@@ -11640,7 +11877,8 @@ void PhysicsServerCommandProcessor::resetSimulation()
 {
 	//clean up all data
 
-	m_data->m_cachedVUrdfisualShapes.clear();
+	m_data->m_simulationTimestamp = 0;
+        m_data->m_cachedVUrdfisualShapes.clear();
 
 #ifndef SKIP_SOFT_BODY_MULTI_BODY_DYNAMICS_WORLD
 	if (m_data && m_data->m_dynamicsWorld)

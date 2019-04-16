@@ -108,6 +108,25 @@ B3_SHARED_API b3SharedMemoryCommandHandle b3LoadStateCommandInit(b3PhysicsClient
 	return 0;
 }
 
+B3_SHARED_API b3SharedMemoryCommandHandle b3InitRemoveStateCommand(b3PhysicsClientHandle physClient, int stateId)
+{
+	PhysicsClient* cl = (PhysicsClient*)physClient;
+	b3Assert(cl);
+	b3Assert(cl->canSubmitCommand());
+
+	if (cl->canSubmitCommand())
+	{
+		struct SharedMemoryCommand* command = cl->getAvailableSharedMemoryCommand();
+		b3Assert(command);
+		command->m_type = CMD_REMOVE_STATE;
+		command->m_updateFlags = 0;
+		command->m_loadStateArguments.m_fileName[0] = 0;
+		command->m_loadStateArguments.m_stateId = stateId;
+		return (b3SharedMemoryCommandHandle)command;
+	}
+	return 0;
+}
+
 B3_SHARED_API int b3LoadStateSetStateId(b3SharedMemoryCommandHandle commandHandle, int stateId)
 {
 	struct SharedMemoryCommand* command = (struct SharedMemoryCommand*)commandHandle;
@@ -670,6 +689,17 @@ B3_SHARED_API int b3PhysicsParameterSetMinimumSolverIslandSize(b3SharedMemoryCom
 	return 0;
 }
 
+B3_SHARED_API int b3PhysicsParamSetSolverAnalytics(b3SharedMemoryCommandHandle commandHandle, int reportSolverAnalytics)
+{
+	struct SharedMemoryCommand* command = (struct SharedMemoryCommand*)commandHandle;
+	b3Assert(command->m_type == CMD_SEND_PHYSICS_SIMULATION_PARAMETERS);
+	command->m_physSimParamArgs.m_reportSolverAnalytics = reportSolverAnalytics;
+	command->m_updateFlags |= SIM_PARAM_REPORT_CONSTRAINT_SOLVER_ANALYTICS;
+	return 0;
+}
+
+
+
 B3_SHARED_API int b3PhysicsParamSetCollisionFilterMode(b3SharedMemoryCommandHandle commandHandle, int filterMode)
 {
 	struct SharedMemoryCommand* command = (struct SharedMemoryCommand*)commandHandle;
@@ -990,6 +1020,10 @@ B3_SHARED_API int b3RequestActualStateCommandComputeForwardKinematics(b3SharedMe
 
 B3_SHARED_API int b3GetJointState(b3PhysicsClientHandle physClient, b3SharedMemoryStatusHandle statusHandle, int jointIndex, b3JointSensorState* state)
 {
+
+	
+	
+
 	const SharedMemoryStatus* status = (const SharedMemoryStatus*)statusHandle;
 	b3Assert(status);
 	int bodyIndex = status->m_sendActualStateArgs.m_bodyUniqueId;
@@ -997,13 +1031,14 @@ B3_SHARED_API int b3GetJointState(b3PhysicsClientHandle physClient, b3SharedMemo
 	if (bodyIndex >= 0)
 	{
 		b3JointInfo info;
+
 		bool result = b3GetJointInfo(physClient, bodyIndex, jointIndex, &info) != 0;
-		if (result)
+		if (result && status->m_sendActualStateArgs.m_stateDetails)
 		{
 			if ((info.m_qIndex >= 0) && (info.m_uIndex >= 0) && (info.m_qIndex < MAX_DEGREE_OF_FREEDOM) && (info.m_uIndex < MAX_DEGREE_OF_FREEDOM))
 			{
-				state->m_jointPosition = status->m_sendActualStateArgs.m_actualStateQ[info.m_qIndex];
-				state->m_jointVelocity = status->m_sendActualStateArgs.m_actualStateQdot[info.m_uIndex];
+				state->m_jointPosition = status->m_sendActualStateArgs.m_stateDetails->m_actualStateQ[info.m_qIndex];
+				state->m_jointVelocity = status->m_sendActualStateArgs.m_stateDetails->m_actualStateQdot[info.m_uIndex];
 			}
 			else
 			{
@@ -1012,9 +1047,9 @@ B3_SHARED_API int b3GetJointState(b3PhysicsClientHandle physClient, b3SharedMemo
 			}
 			for (int ii(0); ii < 6; ++ii)
 			{
-				state->m_jointForceTorque[ii] = status->m_sendActualStateArgs.m_jointReactionForces[6 * jointIndex + ii];
+				state->m_jointForceTorque[ii] = status->m_sendActualStateArgs.m_stateDetails->m_jointReactionForces[6 * jointIndex + ii];
 			}
-			state->m_jointMotorTorque = status->m_sendActualStateArgs.m_jointMotorForce[jointIndex];
+			state->m_jointMotorTorque = status->m_sendActualStateArgs.m_stateDetails->m_jointMotorForce[jointIndex];
 			return 1;
 		}
 	}
@@ -1042,11 +1077,12 @@ B3_SHARED_API int b3GetJointStateMultiDof(b3PhysicsClientHandle physClient, b3Sh
 				state->m_uDofSize = info.m_uSize;
 				for (int i = 0; i < state->m_qDofSize; i++)
 				{
-					state->m_jointPosition[i] = status->m_sendActualStateArgs.m_actualStateQ[info.m_qIndex + i];
+					state->m_jointPosition[i] = status->m_sendActualStateArgs.m_stateDetails->m_actualStateQ[info.m_qIndex + i];
 				}
 				for (int i = 0; i < state->m_uDofSize; i++)
 				{
-					state->m_jointVelocity[i] = status->m_sendActualStateArgs.m_actualStateQdot[info.m_uIndex+i];
+					state->m_jointVelocity[i] = status->m_sendActualStateArgs.m_stateDetails->m_actualStateQdot[info.m_uIndex+i];
+					state->m_jointMotorTorqueMultiDof[i] = status->m_sendActualStateArgs.m_stateDetails->m_jointMotorForceMultiDof[info.m_uIndex + i];
 				}
 			}
 			else
@@ -1056,9 +1092,9 @@ B3_SHARED_API int b3GetJointStateMultiDof(b3PhysicsClientHandle physClient, b3Sh
 			}
 			for (int ii(0); ii < 6; ++ii)
 			{
-				state->m_jointReactionForceTorque[ii] = status->m_sendActualStateArgs.m_jointReactionForces[6 * jointIndex + ii];
+				state->m_jointReactionForceTorque[ii] = status->m_sendActualStateArgs.m_stateDetails->m_jointReactionForces[6 * jointIndex + ii];
 			}
-			state->m_jointMotorTorque = status->m_sendActualStateArgs.m_jointMotorForce[jointIndex];
+			
 			return 1;
 		}
 	}
@@ -1076,21 +1112,21 @@ B3_SHARED_API int b3GetLinkState(b3PhysicsClientHandle physClient, b3SharedMemor
 	int numLinks = status->m_sendActualStateArgs.m_numLinks;
 	b3Assert(linkIndex < numLinks);
 
-	if ((bodyIndex >= 0) && (linkIndex >= 0) && linkIndex < numLinks)
+	if (status->m_sendActualStateArgs.m_stateDetails != NULL && (bodyIndex >= 0) && (linkIndex >= 0) && linkIndex < numLinks)
 	{
 		b3Transform wlf, com, inertial;
 
 		for (int i = 0; i < 3; ++i)
 		{
-			state->m_worldPosition[i] = status->m_sendActualStateArgs.m_linkState[7 * linkIndex + i];
-			state->m_localInertialPosition[i] = status->m_sendActualStateArgs.m_linkLocalInertialFrames[7 * linkIndex + i];
-			state->m_worldLinearVelocity[i] = status->m_sendActualStateArgs.m_linkWorldVelocities[6 * linkIndex + i];
-			state->m_worldAngularVelocity[i] = status->m_sendActualStateArgs.m_linkWorldVelocities[6 * linkIndex + i + 3];
+			state->m_worldPosition[i] = status->m_sendActualStateArgs.m_stateDetails->m_linkState[7 * linkIndex + i];
+			state->m_localInertialPosition[i] = status->m_sendActualStateArgs.m_stateDetails->m_linkLocalInertialFrames[7 * linkIndex + i];
+			state->m_worldLinearVelocity[i] = status->m_sendActualStateArgs.m_stateDetails->m_linkWorldVelocities[6 * linkIndex + i];
+			state->m_worldAngularVelocity[i] = status->m_sendActualStateArgs.m_stateDetails->m_linkWorldVelocities[6 * linkIndex + i + 3];
 		}
 		for (int i = 0; i < 4; ++i)
 		{
-			state->m_worldOrientation[i] = status->m_sendActualStateArgs.m_linkState[7 * linkIndex + 3 + i];
-			state->m_localInertialOrientation[i] = status->m_sendActualStateArgs.m_linkLocalInertialFrames[7 * linkIndex + 3 + i];
+			state->m_worldOrientation[i] = status->m_sendActualStateArgs.m_stateDetails->m_linkState[7 * linkIndex + 3 + i];
+			state->m_localInertialOrientation[i] = status->m_sendActualStateArgs.m_stateDetails->m_linkLocalInertialFrames[7 * linkIndex + 3 + i];
 		}
 		com.setOrigin(b3MakeVector3(state->m_worldPosition[0], state->m_worldPosition[1], state->m_worldPosition[2]));
 		com.setRotation(b3Quaternion(state->m_worldOrientation[0], state->m_worldOrientation[1], state->m_worldOrientation[2], state->m_worldOrientation[3]));
@@ -1604,7 +1640,26 @@ B3_SHARED_API b3SharedMemoryCommandHandle b3CreateMultiBodyCommandInit(b3Physics
 		command->m_createMultiBodyArgs.m_bodyName[0] = 0;
 		command->m_createMultiBodyArgs.m_baseLinkIndex = -1;
 		command->m_createMultiBodyArgs.m_numLinks = 0;
+		command->m_createMultiBodyArgs.m_numBatchObjects = 0;
 		return (b3SharedMemoryCommandHandle)command;
+	}
+	return 0;
+}
+
+//batch creation is an performance feature to create a large number of multi bodies in one command
+B3_SHARED_API int b3CreateMultiBodySetBatchPositions(b3PhysicsClientHandle physClient, b3SharedMemoryCommandHandle commandHandle, double* batchPositions, int numBatchObjects)
+{
+	struct SharedMemoryCommand* command = (struct SharedMemoryCommand*)commandHandle;
+	b3Assert(command);
+	b3Assert(command->m_type == CMD_CREATE_MULTI_BODY);
+	PhysicsClient* cl = (PhysicsClient*)physClient;
+	b3Assert(cl);
+	b3Assert(cl->canSubmitCommand());
+	
+	if (cl && command->m_type == CMD_CREATE_MULTI_BODY)
+	{
+		command->m_createMultiBodyArgs.m_numBatchObjects = numBatchObjects;
+		cl->uploadBulletFileToSharedMemory((const char*)batchPositions, sizeof(double) * 3 * numBatchObjects);
 	}
 	return 0;
 }
@@ -2170,6 +2225,19 @@ B3_SHARED_API int b3GetStatusType(b3SharedMemoryStatusHandle statusHandle)
 	return CMD_INVALID_STATUS;
 }
 
+B3_SHARED_API int b3GetStatusForwardDynamicsAnalyticsData(b3SharedMemoryStatusHandle statusHandle, struct b3ForwardDynamicsAnalyticsArgs* analyticsData)
+{
+	const SharedMemoryStatus* status = (const SharedMemoryStatus*)statusHandle;
+	//b3Assert(status);
+	if (status)
+	{
+		*analyticsData = status->m_forwardDynamicsAnalyticsArgs;
+		return status->m_forwardDynamicsAnalyticsArgs.m_numIslands;
+	}
+	return 0;
+}
+
+
 B3_SHARED_API int b3GetStatusBodyIndices(b3SharedMemoryStatusHandle statusHandle, int* bodyIndicesOut, int bodyIndicesCapacity)
 {
 	int numBodies = 0;
@@ -2318,19 +2386,19 @@ B3_SHARED_API int b3GetStatusActualState2(b3SharedMemoryStatusHandle statusHandl
 	}
 	if (linkLocalInertialFrames)
 	{
-		*linkLocalInertialFrames = args.m_linkLocalInertialFrames;
+		*linkLocalInertialFrames = args.m_stateDetails->m_linkLocalInertialFrames;
 	}
 	if (jointMotorForces)
 	{
-		*jointMotorForces = args.m_jointMotorForce;
+		*jointMotorForces = args.m_stateDetails->m_jointMotorForce;
 	}
 	if (linkStates)
 	{
-		*linkStates = args.m_linkState;
+		*linkStates = args.m_stateDetails->m_linkState;
 	}
 	if (linkWorldVelocities)
 	{
-		*linkWorldVelocities = args.m_linkWorldVelocities;
+		*linkWorldVelocities = args.m_stateDetails->m_linkWorldVelocities;
 	}
 	return 1;
 }
@@ -2371,15 +2439,15 @@ B3_SHARED_API int b3GetStatusActualState(b3SharedMemoryStatusHandle statusHandle
 	}
 	if (actualStateQ)
 	{
-		*actualStateQ = args.m_actualStateQ;
+		*actualStateQ = args.m_stateDetails->m_actualStateQ;
 	}
 	if (actualStateQdot)
 	{
-		*actualStateQdot = args.m_actualStateQdot;
+		*actualStateQdot = args.m_stateDetails->m_actualStateQdot;
 	}
 	if (jointReactionForces)
 	{
-		*jointReactionForces = args.m_jointReactionForces;
+		*jointReactionForces = args.m_stateDetails->m_jointReactionForces;
 	}
 	return true;
 }
@@ -2499,6 +2567,12 @@ B3_SHARED_API int b3GetNumJoints(b3PhysicsClientHandle physClient, int bodyUniqu
 {
 	PhysicsClient* cl = (PhysicsClient*)physClient;
 	return cl->getNumJoints(bodyUniqueId);
+}
+
+B3_SHARED_API int b3GetNumDofs(b3PhysicsClientHandle physClient, int bodyUniqueId)
+{
+        PhysicsClient* cl = (PhysicsClient*)physClient;
+        return cl->getNumDofs(bodyUniqueId);
 }
 
 B3_SHARED_API int b3ComputeDofCount(b3PhysicsClientHandle physClient, int bodyUniqueId)
@@ -2755,6 +2829,21 @@ B3_SHARED_API int b3ChangeDynamicsInfoSetMass(b3SharedMemoryCommandHandle comman
 	return 0;
 }
 
+B3_SHARED_API int b3ChangeDynamicsInfoSetAnisotropicFriction(b3SharedMemoryCommandHandle commandHandle, int bodyUniqueId, int linkIndex, const double anisotropicFriction[])
+{
+	struct SharedMemoryCommand* command = (struct SharedMemoryCommand*)commandHandle;
+	b3Assert(command->m_type == CMD_CHANGE_DYNAMICS_INFO);
+	command->m_changeDynamicsInfoArgs.m_bodyUniqueId = bodyUniqueId;
+	command->m_changeDynamicsInfoArgs.m_linkIndex = linkIndex;
+	command->m_changeDynamicsInfoArgs.m_anisotropicFriction[0] = anisotropicFriction[0];
+	command->m_changeDynamicsInfoArgs.m_anisotropicFriction[1] = anisotropicFriction[1];
+	command->m_changeDynamicsInfoArgs.m_anisotropicFriction[2] = anisotropicFriction[2];
+
+	command->m_updateFlags |= CHANGE_DYNAMICS_INFO_SET_ANISOTROPIC_FRICTION;
+	return 0;
+}
+
+
 B3_SHARED_API int b3ChangeDynamicsInfoSetLocalInertiaDiagonal(b3SharedMemoryCommandHandle commandHandle, int bodyUniqueId, int linkIndex, const double localInertiaDiagonal[])
 {
 	struct SharedMemoryCommand* command = (struct SharedMemoryCommand*)commandHandle;
@@ -2831,6 +2920,18 @@ B3_SHARED_API int b3ChangeDynamicsInfoSetAngularDamping(b3SharedMemoryCommandHan
 	return 0;
 }
 
+B3_SHARED_API int b3ChangeDynamicsInfoSetJointDamping(b3SharedMemoryCommandHandle commandHandle, int bodyUniqueId, int linkIndex, double jointDamping)
+{
+	struct SharedMemoryCommand* command = (struct SharedMemoryCommand*)commandHandle;
+	b3Assert(command->m_type == CMD_CHANGE_DYNAMICS_INFO);
+	command->m_changeDynamicsInfoArgs.m_bodyUniqueId = bodyUniqueId;
+	command->m_changeDynamicsInfoArgs.m_linkIndex = linkIndex;
+	command->m_changeDynamicsInfoArgs.m_jointDamping = jointDamping;
+	command->m_updateFlags |= CHANGE_DYNAMICS_INFO_SET_JOINT_DAMPING;
+	return 0;
+}
+
+
 B3_SHARED_API int b3ChangeDynamicsInfoSetContactStiffnessAndDamping(b3SharedMemoryCommandHandle commandHandle, int bodyUniqueId, int linkIndex, double contactStiffness, double contactDamping)
 {
 	struct SharedMemoryCommand* command = (struct SharedMemoryCommand*)commandHandle;
@@ -2875,6 +2976,19 @@ B3_SHARED_API int b3ChangeDynamicsInfoSetContactProcessingThreshold(b3SharedMemo
 	command->m_updateFlags |= CHANGE_DYNAMICS_INFO_SET_CONTACT_PROCESSING_THRESHOLD;
 	return 0;
 }
+
+B3_SHARED_API int b3ChangeDynamicsInfoSetMaxJointVelocity(b3SharedMemoryCommandHandle commandHandle, int bodyUniqueId, double maxJointVelocity)
+{
+	struct SharedMemoryCommand* command = (struct SharedMemoryCommand*)commandHandle;
+	b3Assert(command->m_type == CMD_CHANGE_DYNAMICS_INFO);
+	command->m_changeDynamicsInfoArgs.m_bodyUniqueId = bodyUniqueId;
+	command->m_changeDynamicsInfoArgs.m_linkIndex = -1;
+	command->m_changeDynamicsInfoArgs.m_maxJointVelocity = maxJointVelocity;
+	command->m_updateFlags |= CHANGE_DYNAMICS_INFO_SET_MAX_JOINT_VELOCITY;
+	return 0;
+}
+
+
 
 B3_SHARED_API int b3ChangeDynamicsInfoSetActivationState(b3SharedMemoryCommandHandle commandHandle, int bodyUniqueId, int activationState)
 {
@@ -4577,8 +4691,9 @@ B3_SHARED_API b3SharedMemoryCommandHandle b3CalculateJacobianCommandInit(b3Physi
 	command->m_calculateJacobianArguments.m_localPosition[0] = localPosition[0];
 	command->m_calculateJacobianArguments.m_localPosition[1] = localPosition[1];
 	command->m_calculateJacobianArguments.m_localPosition[2] = localPosition[2];
-	int numJoints = cl->getNumJoints(bodyUniqueId);
-	for (int i = 0; i < numJoints; i++)
+
+	int numDofs = cl->getNumDofs(bodyUniqueId);
+	for (int i = 0; i < numDofs; i++)
 	{
 		command->m_calculateJacobianArguments.m_jointPositionsQ[i] = jointPositionsQ[i];
 		command->m_calculateJacobianArguments.m_jointVelocitiesQdot[i] = jointVelocitiesQdot[i];
